@@ -1,0 +1,23 @@
+name: Daily gold & silver rate
+
+on:
+  schedule:
+    # 05:30 UTC = 11:15 AM Nepal time (FENEGOSIDA posts the day's rate ~10:30 AM NPT)
+    - cron: "30 5 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Send rates
+        env:
+          RECIPIENTS: ${{ secrets.RECIPIENTS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+        run: python send_prices.py
