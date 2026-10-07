@@ -14,6 +14,7 @@ Environment variables
                       code (e.g. 9779812345678) or a group id ending in @g.us
   TELEGRAM_BOT_TOKEN  (optional) Telegram bot token
   TELEGRAM_CHAT_IDS   (optional) comma/newline separated chat or channel ids
+  TEST_MODE           (optional) "true" = send immediately, labelled [TEST]
   MAX_WAIT_MIN        (optional) minutes to wait for today's rate, default 60
 """
 import json
@@ -135,8 +136,13 @@ def send_telegram(token, chat_id, text):
 
 
 def main():
-    rates = wait_for_today(int(os.environ.get("MAX_WAIT_MIN", "60")))
-    text = build_message(rates)
+    test_mode = os.environ.get("TEST_MODE", "").strip().lower() == "true"
+    if test_mode:
+        rates = fetch_rates()  # no waiting: send whatever the feed has right now
+        text = "[TEST - may be previous day's rate]\n" + build_message(rates)
+    else:
+        rates = wait_for_today(int(os.environ.get("MAX_WAIT_MIN", "60")))
+        text = build_message(rates)
     print(text, "\n")
 
     recipients = parse_recipients(os.environ.get("RECIPIENTS", ""))
