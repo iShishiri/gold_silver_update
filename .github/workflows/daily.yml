@@ -18,6 +18,10 @@ jobs:
       - name: Send rates
         env:
           RECIPIENTS: ${{ secrets.RECIPIENTS }}
+          GREEN_API_ID: ${{ secrets.GREEN_API_ID }}
+          GREEN_API_TOKEN: ${{ secrets.GREEN_API_TOKEN }}
+          GREEN_API_URL: ${{ secrets.GREEN_API_URL }}
+          GREEN_API_CHATS: ${{ secrets.GREEN_API_CHATS }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
         run: python send_prices.py
