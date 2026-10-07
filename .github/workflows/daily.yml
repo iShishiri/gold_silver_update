@@ -4,7 +4,12 @@ on:
   schedule:
     # 05:30 UTC = 11:15 AM Nepal time (FENEGOSIDA posts the day's rate ~10:30 AM NPT)
     - cron: "30 5 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Test mode: send immediately without waiting for today's rate"
+        type: boolean
+        default: false
 
 jobs:
   send:
@@ -17,6 +22,7 @@ jobs:
           python-version: "3.12"
       - name: Send rates
         env:
+          TEST_MODE: ${{ inputs.test }}
           RECIPIENTS: ${{ secrets.RECIPIENTS }}
           GREEN_API_ID: ${{ secrets.GREEN_API_ID }}
           GREEN_API_TOKEN: ${{ secrets.GREEN_API_TOKEN }}
