@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -31,41 +32,82 @@ NPT = timezone(timedelta(hours=5, minutes=45))
 UA = {"User-Agent": "Mozilla/5.0 (gold-silver-alert)"}
 
 
-def http_get(url, timeout=30):
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8")
+def http_get(url, timeout=30, retries=1):
+    """GET with retry on transient failures (5xx, 429, timeouts, connection errors).
+
+    Keep retries=1 for anything with side effects (sending messages) so a retry can't duplicate it.
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            transient = e.code >= 500 or e.code == 429
+            if not transient or attempt == retries:
+                raise
+            reason = f"HTTP {e.code}"
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt == retries:
+                raise
+            reason = str(e)
+        delay = 10 * attempt
+        print(f"GET failed ({reason}), retry {attempt}/{retries - 1} in {delay}s...", flush=True)
+        time.sleep(delay)
 
 
 def fetch_rates():
-    rows = json.loads(http_get(API_URL))
+    try:
+        rows = json.loads(http_get(API_URL, retries=3))
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Feed returned invalid JSON: {e}") from e
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError(f"Feed returned no rate rows: {str(rows)[:200]}")
     out = {}
     for row in rows:
-        name = row["rateType"]
-        if "१ तोला" not in name:
-            continue
-        if "सुन" in name:
-            key = "gold"
-        elif "चाँदी" in name:
-            key = "silver"
-        else:
-            continue
-        out[key] = {
-            "today": float(row["todayBaseRatePerGram"]),
-            "yesterday": float(row["yestardayBaseRatePerGram"]),
-            "date": datetime.fromisoformat(row["todayDate"]).astimezone(NPT).date(),
-        }
+        try:
+            out.update(parse_row(row))
+        except (KeyError, TypeError, ValueError) as e:
+            raise RuntimeError(f"Unexpected feed row ({e!r}): {row}") from e
     if "gold" not in out or "silver" not in out:
         raise RuntimeError(f"Unexpected feed format: {rows}")
     return out
+
+
+def parse_row(row):
+    """Return {'gold'|'silver': {...}} for a per-tola row, or {} for any other row."""
+    name = row["rateType"]
+    if "१ तोला" not in name:
+        return {}
+    if "सुन" in name:
+        key = "gold"
+    elif "चाँदी" in name:
+        key = "silver"
+    else:
+        return {}
+    today = float(row["todayBaseRatePerGram"])
+    if today <= 0:
+        raise ValueError(f"non-positive rate {today}")
+    return {key: {
+        "today": today,
+        "yesterday": float(row["yestardayBaseRatePerGram"]),
+        "date": datetime.fromisoformat(row["todayDate"]).astimezone(NPT).date(),
+    }}
 
 
 def wait_for_today(max_wait_min):
     """Poll until the feed's date is today's Nepal date (or time runs out)."""
     deadline = time.time() + max_wait_min * 60
     while True:
-        rates = fetch_rates()
         today = datetime.now(NPT).date()
+        try:
+            rates = fetch_rates()
+        except Exception as e:  # feed down (e.g. HTTP 521) or malformed: keep retrying until the deadline
+            if time.time() >= deadline:
+                raise RuntimeError(f"Feed unavailable until the deadline: {e}") from e
+            print(f"Feed error ({e}), retrying in 5 min...", flush=True)
+            time.sleep(300)
+            continue
         if rates["gold"]["date"] == today and rates["silver"]["date"] == today:
             return rates
         if time.time() >= deadline:
@@ -137,12 +179,17 @@ def send_telegram(token, chat_id, text):
 
 def main():
     test_mode = os.environ.get("TEST_MODE", "").strip().lower() == "true"
-    if test_mode:
-        rates = fetch_rates()  # no waiting: send whatever the feed has right now
-        text = "[TEST - may be previous day's rate]\n" + build_message(rates)
-    else:
-        rates = wait_for_today(int(os.environ.get("MAX_WAIT_MIN", "60")))
-        text = build_message(rates)
+    try:
+        if test_mode:
+            rates = fetch_rates()  # no waiting: send whatever the feed has right now
+            text = "[TEST - may be previous day's rate]\n" + build_message(rates)
+        else:
+            rates = wait_for_today(int(os.environ.get("MAX_WAIT_MIN", "60")))
+            text = build_message(rates)
+    except Exception as e:
+        # Nothing was sent. Exit non-zero so the workflow's later scheduled attempt can retry.
+        print(f"ERROR: could not get today's rate: {e}", file=sys.stderr)
+        sys.exit(1)
     print(text, "\n")
 
     recipients = parse_recipients(os.environ.get("RECIPIENTS", ""))

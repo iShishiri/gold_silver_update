@@ -1,9 +1,14 @@
 name: Daily gold & silver rate
 
+run-name: Daily rate${{ inputs.test && ' [test]' || '' }}
+
 on:
   schedule:
-    # 05:30 UTC = 11:15 AM Nepal time (FENEGOSIDA posts the day's rate ~10:30 AM NPT)
-    - cron: "30 5 * * *"
+    # FENEGOSIDA posts the day's rate ~10:30 AM NPT. Each attempt waits up to MAX_WAIT_MIN
+    # for it, then fails; the next attempt retries. Once one attempt succeeds, the rest skip.
+    - cron: "30 5 * * *"   # 11:15 AM NPT - first attempt
+    - cron: "30 7 * * *"   # 01:15 PM NPT - retry if the feed was down / not posted yet
+    - cron: "30 9 * * *"   # 03:15 PM NPT - last retry
   workflow_dispatch:
     inputs:
       test:
@@ -11,16 +16,47 @@ on:
         type: boolean
         default: false
 
+# Never let two attempts overlap (a slow first attempt must not race the retry).
+concurrency:
+  group: daily-rate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   send:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      - name: Skip if today's rate was already sent
+        id: guard
+        # Only scheduled runs are guarded; a manual run always sends.
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Start of today in Nepal time (UTC+5:45), as a UTC timestamp.
+          start=$(date -u -d "$(TZ=Asia/Kathmandu date +%F)T00:00:00+05:45" +%Y-%m-%dT%H:%M:%SZ)
+          sent=$(gh run list --workflow daily.yml --status success --limit 50 \
+                   --json createdAt,displayTitle \
+                   --jq "[.[] | select(.createdAt >= \"$start\" and (.displayTitle | contains(\"[test]\") | not))] | length")
+          echo "Successful non-test runs since $start: $sent"
+          if [ "$sent" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Already sent today - skipping this attempt."
+          fi
+
       - uses: actions/setup-python@v5
+        if: steps.guard.outputs.skip != 'true'
         with:
           python-version: "3.12"
+
       - name: Send rates
+        if: steps.guard.outputs.skip != 'true'
         env:
           TEST_MODE: ${{ inputs.test }}
           RECIPIENTS: ${{ secrets.RECIPIENTS }}
