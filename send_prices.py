@@ -7,6 +7,11 @@ Environment variables
   RECIPIENTS          one "phone:apikey" per line (or comma separated), e.g.
                         +9779800000000:123456
                         +9779811111111:654321
+  GREEN_API_ID        (optional) Green API idInstance (numbers only)
+  GREEN_API_TOKEN     (optional) Green API apiTokenInstance
+  GREEN_API_URL       (optional) your instance's apiUrl, default https://api.green-api.com
+  GREEN_API_CHATS     (optional) one per line/comma: a phone number with country
+                      code (e.g. 9779812345678) or a group id ending in @g.us
   TELEGRAM_BOT_TOKEN  (optional) Telegram bot token
   TELEGRAM_CHAT_IDS   (optional) comma/newline separated chat or channel ids
   MAX_WAIT_MIN        (optional) minutes to wait for today's rate, default 60
@@ -109,6 +114,18 @@ def send_whatsapp(phone, key, text):
     print(f"WhatsApp {phone[:6]}***: sent (response: {re.sub(r'<[^>]+>', ' ', body).strip()[:80]})")
 
 
+def send_green_api(base_url, instance_id, token, chat, text):
+    chat = chat.strip().lstrip("+")
+    if "@" not in chat:
+        chat += "@c.us"
+    url = f"{base_url.rstrip('/')}/waInstance{instance_id}/sendMessage/{token}"
+    payload = json.dumps({"chatId": chat, "message": text}).encode()
+    req = urllib.request.Request(url, data=payload, headers={**UA, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        body = r.read().decode("utf-8")
+    print(f"Green API {chat[:8]}***: sent ({body[:60]})")
+
+
 def send_telegram(token, chat_id, text):
     data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
     req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data, headers=UA)
@@ -126,7 +143,13 @@ def main():
     tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     tg_chats = [c.strip() for c in re.split(r"[\n,;]+", os.environ.get("TELEGRAM_CHAT_IDS", "")) if c.strip()]
 
-    if not recipients and not (tg_token and tg_chats):
+    ga_id = os.environ.get("GREEN_API_ID", "").strip()
+    ga_token = os.environ.get("GREEN_API_TOKEN", "").strip()
+    ga_url = os.environ.get("GREEN_API_URL", "").strip() or "https://api.green-api.com"
+    ga_chats = [c.strip() for c in re.split(r"[\n,;]+", os.environ.get("GREEN_API_CHATS", "")) if c.strip()]
+    use_green = bool(ga_id and ga_token and ga_chats)
+
+    if not recipients and not use_green and not (tg_token and tg_chats):
         print("No recipients configured - dry run only.")
         return
 
@@ -138,6 +161,14 @@ def main():
             failures += 1
             print(f"WhatsApp {phone[:6]}*** FAILED: {e}")
         time.sleep(2)
+    if use_green:
+        for chat in ga_chats:
+            try:
+                send_green_api(ga_url, ga_id, ga_token, chat, text)
+            except Exception as e:
+                failures += 1
+                print(f"Green API {chat[:8]}*** FAILED: {e}")
+            time.sleep(2)
     if tg_token:
         for chat in tg_chats:
             try:
