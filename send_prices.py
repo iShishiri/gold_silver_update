@@ -16,6 +16,8 @@ Environment variables
   TELEGRAM_CHAT_IDS   (optional) comma/newline separated chat or channel ids
   TEST_MODE           (optional) "true" = send immediately, labelled [TEST]
   MAX_WAIT_MIN        (optional) minutes to wait for today's rate, default 60
+  ALLOW_STALE         (optional) "true" = if today's rate never appears, send the latest one
+                      (with its own date) instead of failing. Set on the final attempt only.
 """
 import json
 import os
@@ -95,8 +97,13 @@ def parse_row(row):
     }}
 
 
-def wait_for_today(max_wait_min):
-    """Poll until the feed's date is today's Nepal date (or time runs out)."""
+def wait_for_today(max_wait_min, allow_stale=False):
+    """Poll until the feed's date is today's Nepal date (or time runs out).
+
+    allow_stale: on the final attempt, send the latest rate the feed has (e.g. Saturday or a
+    holiday, when no new rate is posted) instead of failing. The message carries the rate's own
+    date, so it is never mistaken for today's.
+    """
     deadline = time.time() + max_wait_min * 60
     while True:
         today = datetime.now(NPT).date()
@@ -111,6 +118,10 @@ def wait_for_today(max_wait_min):
         if rates["gold"]["date"] == today and rates["silver"]["date"] == today:
             return rates
         if time.time() >= deadline:
+            if allow_stale:
+                print(f"Feed still shows {rates['gold']['date']}, expected {today}. "
+                      "Final attempt: sending the latest available rate with its date.", flush=True)
+                return rates
             raise RuntimeError(
                 f"Feed still shows {rates['gold']['date']}, expected {today}. Not sending a stale price."
             )
@@ -118,21 +129,30 @@ def wait_for_today(max_wait_min):
         time.sleep(300)
 
 
-def fmt_line(label, d):
-    diff = d["today"] - d["yesterday"]
-    pct = diff / d["yesterday"] * 100 if d["yesterday"] else 0
-    arrow = "▲" if diff > 0 else "▼" if diff < 0 else "▬"
-    change = "no change" if diff == 0 else f"{arrow} {abs(diff):,.0f} ({pct:+.2f}%)"
-    return f"{label}: Rs {d['today']:,.0f} /tola  {change}"
+def fmt_line(icon, label, d):
+    diff = round(d["today"] - d["yesterday"])
+    if diff > 0:
+        change = f"🟢 ▲ {diff:,}"
+    elif diff < 0:
+        change = f"🔴 ▼ {abs(diff):,}"
+    else:
+        change = "⚪ no change"
+    return f"{icon} {label}: *Rs {d['today']:,.0f}* /tola  {change}"
 
 
 def build_message(rates):
-    date = rates["gold"]["date"].strftime("%d %b %Y")
+    gold, silver = rates["gold"], rates["silver"]
+    fmt_date = lambda d: d["date"].strftime("%d %b %Y")
+    if gold["date"] == silver["date"]:
+        return "\n".join([
+            f"📅 {fmt_date(gold)}",
+            fmt_line("🥇", "Gold", gold),
+            fmt_line("🥈", "Silver", silver),
+        ])
+    # The two rows carry different dates (rare): show each one so the date is never wrong.
     return "\n".join([
-        f"Gold & Silver Rate - {date}",
-        fmt_line("Gold (hallmark)", rates["gold"]),
-        fmt_line("Silver", rates["silver"]),
-        "Source: FENEGOSIDA",
+        fmt_line("🥇", "Gold", gold) + f"  ({fmt_date(gold)})",
+        fmt_line("🥈", "Silver", silver) + f"  ({fmt_date(silver)})",
     ])
 
 
@@ -184,7 +204,8 @@ def main():
             rates = fetch_rates()  # no waiting: send whatever the feed has right now
             text = "[TEST - may be previous day's rate]\n" + build_message(rates)
         else:
-            rates = wait_for_today(int(os.environ.get("MAX_WAIT_MIN", "60")))
+            allow_stale = os.environ.get("ALLOW_STALE", "").strip().lower() == "true"
+            rates = wait_for_today(int(os.environ.get("MAX_WAIT_MIN", "60")), allow_stale)
             text = build_message(rates)
     except Exception as e:
         # Nothing was sent. Exit non-zero so the workflow's later scheduled attempt can retry.
